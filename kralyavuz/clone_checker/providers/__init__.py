@@ -10,11 +10,18 @@ class CloneCheckerProvider(Protocol):
         ...
 
 
-from .search_provider import SearchProviderError, YandexSearchProvider
+from .search_provider import (
+    GoogleSearchProvider,
+    PlaywrightGoogleSearchFallback,
+    SearchProviderError,
+    YandexSearchProvider,
+)
 from .redirect_provider import RedirectProvider, RedirectProviderError
 
 __all__ = [
     "CloneCheckerProvider",
+    "GoogleSearchProvider",
+    "PlaywrightGoogleSearchFallback",
     "RedirectProvider",
     "RedirectProviderError",
     "SearchProviderError",

@@ -7,6 +7,7 @@ from .domain_validation import normalize_domain, validate_search_results
 from .exclude_domains import mark_excluded_results
 from .providers import (
     CloneCheckerProvider,
+    GoogleSearchProvider,
     RedirectProvider,
     RedirectProviderError,
     SearchProviderError,
@@ -29,7 +30,10 @@ class CloneCheckerService:
         whitelist: Optional[WhitelistStore] = None,
     ) -> None:
         configured = tuple(providers)
-        self.providers = configured or (YandexSearchProvider(),)
+        self.providers = configured or (
+            YandexSearchProvider(),
+            GoogleSearchProvider(),
+        )
         self.redirect_provider = redirect_provider or RedirectProvider()
         self.whitelist = whitelist or WhitelistStore()
 
