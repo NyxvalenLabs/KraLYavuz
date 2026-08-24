@@ -7,7 +7,6 @@ from .domain_validation import normalize_domain, validate_search_results
 from .exclude_domains import mark_excluded_results
 from .providers import (
     CloneCheckerProvider,
-    GoogleSearchProvider,
     RedirectProvider,
     RedirectProviderError,
     SearchProviderError,
@@ -30,10 +29,7 @@ class CloneCheckerService:
         whitelist: Optional[WhitelistStore] = None,
     ) -> None:
         configured = tuple(providers)
-        self.providers = configured or (
-            YandexSearchProvider(),
-            GoogleSearchProvider(),
-        )
+        self.providers = configured or (YandexSearchProvider(),)
         self.redirect_provider = redirect_provider or RedirectProvider()
         self.whitelist = whitelist or WhitelistStore()
 
@@ -60,9 +56,11 @@ class CloneCheckerService:
         for keyword in self.keywords_for(brand):
             for provider in self.providers:
                 try:
-                    results.extend(provider.search(keyword))
+                    provider_results = provider.search(keyword)
                 except SearchProviderError as exc:
                     errors.append(str(exc))
+                    continue
+                results.extend(provider_results)
         if not results:
             message = errors[0] if errors else "Arama sonucu bulunamadı."
             return CloneCheckResult(brand, CloneCheckStatus.ERROR, message)

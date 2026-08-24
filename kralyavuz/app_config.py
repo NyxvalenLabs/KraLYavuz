@@ -5,7 +5,11 @@ from typing import Any, Dict, Iterable
 from .platform_paths import CONFIG_PATH
 
 
-DEFAULT_CONFIG = {"domains": []}
+DEFAULT_CONFIG = {
+    "domains": [],
+    "google_api_key": "",
+    "google_cx_id": "",
+}
 
 
 def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
@@ -22,7 +26,18 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
         if isinstance(domains, list)
         else []
     )
+    for key in ("google_api_key", "google_cx_id"):
+        if not isinstance(config.get(key), str):
+            config[key] = ""
     return config
+
+
+def has_google_api_config(path: Path = CONFIG_PATH) -> bool:
+    config = load_config(path)
+    return bool(
+        config["google_api_key"].strip()
+        and config["google_cx_id"].strip()
+    )
 
 
 def save_config(config: Dict[str, Any], path: Path = CONFIG_PATH) -> None:

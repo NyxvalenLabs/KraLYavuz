@@ -7,7 +7,7 @@ from threading import Event, Lock
 from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QCloseEvent, QDesktopServices, QPixmap
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -39,11 +39,18 @@ from .clone_checker.ui import CloneCheckerPanel
 from .clone_checker.whitelist import normalize_domain_list
 from .kral_tap import KralTapWidget
 from .output_settings import clean_output_dir, get_output_dir, set_output_dir
+from .platform_paths import application_icon_path
 
 
 APP_NAME = "KraLYavuz"
 shutdown_requested = Event()
 UrlTask = Tuple[str, str]
+
+
+def set_application_icon(app: QApplication) -> Path:
+    icon_path = application_icon_path()
+    app.setWindowIcon(QIcon(str(icon_path)))
+    return icon_path
 
 
 def parse_url_tasks(text: str) -> List[UrlTask]:
@@ -734,6 +741,7 @@ def main() -> int:
     get_output_dir().mkdir(parents=True, exist_ok=True)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    set_application_icon(app)
     window = MainWindow(auto_start=args.auto_start, auto_exit=args.auto_exit)
     window.show()
     return app.exec()

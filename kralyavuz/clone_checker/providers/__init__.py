@@ -16,10 +16,12 @@ from .search_provider import (
     SearchProviderError,
     YandexSearchProvider,
 )
+from .google_api_provider import GoogleApiSearchProvider
 from .redirect_provider import RedirectProvider, RedirectProviderError
 
 __all__ = [
     "CloneCheckerProvider",
+    "GoogleApiSearchProvider",
     "GoogleSearchProvider",
     "PlaywrightGoogleSearchFallback",
     "RedirectProvider",

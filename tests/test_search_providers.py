@@ -20,6 +20,7 @@ from kralyavuz.clone_checker.providers import (
     GoogleSearchProvider,
     PlaywrightGoogleSearchFallback,
     SearchProviderError,
+    YandexSearchProvider,
 )
 from kralyavuz.clone_checker.providers.search_provider import (
     clone_edge_profile,
@@ -94,11 +95,11 @@ class _RedirectProvider:
 
 
 class GoogleSearchProviderTests(unittest.TestCase):
-    def test_default_service_registers_yandex_and_google(self):
+    def test_default_service_registers_only_yandex(self):
         service = CloneCheckerService()
         self.assertEqual(
-            [provider.search_engine for provider in service.providers],
-            ["Yandex", "Google"],
+            [type(provider) for provider in service.providers],
+            [YandexSearchProvider],
         )
 
     def test_google_provider_parses_direct_and_tracking_results(self):

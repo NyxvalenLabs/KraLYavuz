@@ -17,6 +17,16 @@ DEFAULT_OUTPUT_DIR = (
 )
 
 
+def application_icon_path(system_name: Optional[str] = None) -> Path:
+    system_name = system_name or platform.system()
+    filename = (
+        "kralyavuz_icon.icns"
+        if system_name == "Darwin"
+        else "kralyavuz_icon.ico"
+    )
+    return ASSETS_DIR / filename
+
+
 def opera_gx_candidates(
     system_name: Optional[str] = None,
     environ: Optional[Mapping[str, str]] = None,
