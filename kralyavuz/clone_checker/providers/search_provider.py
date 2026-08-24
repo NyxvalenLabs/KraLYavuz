@@ -1,14 +1,16 @@
 import logging
+import os
+import platform
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import List, Optional, Protocol, Tuple
+from typing import Iterable, List, Mapping, Optional, Protocol, Tuple
 from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit
 
 import requests
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from ..models import SearchResult
-from ...platform_paths import DEFAULT_OUTPUT_DIR, find_opera_gx
+from ...platform_paths import CONFIG_DIR, DEFAULT_OUTPUT_DIR
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,44 @@ class SearchProviderError(RuntimeError):
 class GoogleBrowserFallback(Protocol):
     def search(self, keyword: str, limit: int) -> List[Tuple[str, str]]:
         ...
+
+
+def google_browser_profile_dirs(
+    system_name: Optional[str] = None,
+    environ: Optional[Mapping[str, str]] = None,
+    home: Optional[Path] = None,
+    config_dir: Optional[Path] = None,
+) -> Tuple[Tuple[str, Path], ...]:
+    system_name = system_name or platform.system()
+    environ = environ or os.environ
+    home = home or Path.home()
+    dedicated_root = (config_dir or CONFIG_DIR) / "browser_profiles"
+    system_profiles = {}
+
+    if system_name == "Windows" and environ.get("LOCALAPPDATA"):
+        local_app_data = Path(environ["LOCALAPPDATA"])
+        system_profiles = {
+            "msedge": local_app_data / "Microsoft" / "Edge" / "User Data",
+            "chrome": local_app_data / "Google" / "Chrome" / "User Data",
+            "chromium": local_app_data / "Chromium" / "User Data",
+        }
+    elif system_name == "Darwin":
+        application_support = home / "Library" / "Application Support"
+        system_profiles = {
+            "msedge": application_support / "Microsoft Edge",
+            "chrome": application_support / "Google" / "Chrome",
+            "chromium": application_support / "Chromium",
+        }
+
+    profile_dirs = []
+    for channel in ("msedge", "chrome", "chromium"):
+        system_profile = system_profiles.get(channel)
+        dedicated_profile = dedicated_root / channel
+        if system_profile is not None and system_profile.is_dir():
+            profile_dirs.append((channel, system_profile))
+        if system_profile != dedicated_profile:
+            profile_dirs.append((channel, dedicated_profile))
+    return tuple(profile_dirs)
 
 
 def _record_google_debug_response(
@@ -235,6 +275,39 @@ class YandexSearchProvider:
 class PlaywrightGoogleSearchFallback:
     search_url = "https://www.google.com/search"
 
+    def __init__(
+        self,
+        profile_dirs: Optional[Iterable[Tuple[str, Path]]] = None,
+    ) -> None:
+        self.profile_dirs = tuple(
+            google_browser_profile_dirs() if profile_dirs is None else profile_dirs
+        )
+        self.selected_channel = ""
+        self.selected_profile_dir: Optional[Path] = None
+
+    def _launch_context(self, chromium):
+        errors = []
+        for channel, profile_dir in self.profile_dirs:
+            try:
+                context = chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir),
+                    channel=channel,
+                    headless=True,
+                    locale="tr-TR",
+                    timeout=10_000,
+                )
+                self.selected_channel = channel
+                self.selected_profile_dir = profile_dir
+                return context
+            except PlaywrightError as exc:
+                errors.append(
+                    f"{channel} ({profile_dir}): {str(exc).splitlines()[0]}"
+                )
+        raise SearchProviderError(
+            "Google headless browser bulunamadı (Edge, Chrome, Chromium): "
+            + "; ".join(errors)
+        )
+
     def search(self, keyword: str, limit: int) -> List[Tuple[str, str]]:
         query = urlencode(
             {
@@ -248,43 +321,32 @@ class PlaywrightGoogleSearchFallback:
         query_url = f"{self.search_url}?{query}"
         try:
             with sync_playwright() as playwright:
-                launch_options = {"headless": True}
-                browser_executable = find_opera_gx()
-                if browser_executable is not None:
-                    launch_options["executable_path"] = str(browser_executable)
-                browser = playwright.chromium.launch(**launch_options)
+                context = self._launch_context(playwright.chromium)
                 try:
-                    context = browser.new_context(
-                        user_agent=YandexSearchProvider.user_agent,
-                        locale="tr-TR",
+                    page = context.new_page()
+                    page.goto(
+                        query_url,
+                        wait_until="domcontentloaded",
+                        timeout=20_000,
                     )
+                    if self._is_captcha_page(page):
+                        raise SearchProviderError(
+                            "Google headless browser CAPTCHA doğrulaması istedi."
+                        )
                     try:
-                        page = context.new_page()
-                        page.goto(
-                            query_url,
-                            wait_until="domcontentloaded",
-                            timeout=20_000,
-                        )
-                        if "/sorry/" in page.url.casefold():
-                            raise SearchProviderError(
-                                "Google headless browser CAPTCHA doğrulaması istedi."
-                            )
-                        try:
-                            page.wait_for_selector("a:has(h3)", timeout=5_000)
-                        except PlaywrightError:
-                            pass
-                        values = page.locator("a:has(h3)").evaluate_all(
-                            """
-                            anchors => anchors.map(anchor => ({
-                                url: anchor.getAttribute('href') || anchor.href || '',
-                                title: (anchor.querySelector('h3')?.innerText || '').trim(),
-                            }))
-                            """
-                        )
-                    finally:
-                        context.close()
+                        page.wait_for_selector("a:has(h3)", timeout=5_000)
+                    except PlaywrightError:
+                        pass
+                    values = page.locator("a:has(h3)").evaluate_all(
+                        """
+                        anchors => anchors.map(anchor => ({
+                            url: anchor.getAttribute('href') || anchor.href || '',
+                            title: (anchor.querySelector('h3')?.innerText || '').trim(),
+                        }))
+                        """
+                    )
                 finally:
-                    browser.close()
+                    context.close()
         except PlaywrightError as exc:
             raise SearchProviderError(
                 f"Google headless browser fallback başarısız: {exc}"
@@ -297,6 +359,19 @@ class PlaywrightGoogleSearchFallback:
             for item in values
             if isinstance(item, dict)
         ]
+
+    @staticmethod
+    def _is_captcha_page(page) -> bool:
+        if "/sorry/" in str(page.url).casefold():
+            return True
+        try:
+            body_text = page.locator("body").inner_text(timeout=2_000).casefold()
+        except PlaywrightError:
+            return False
+        return any(
+            marker in body_text
+            for marker in ("captcha", "unusual traffic", "sıra dışı trafik")
+        )
 
 
 class GoogleSearchProvider:

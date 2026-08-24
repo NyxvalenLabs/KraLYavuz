@@ -3,11 +3,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import requests
+from playwright.sync_api import Error as PlaywrightError
 
 from kralyavuz.clone_checker.models import (
     CloneCheckStatus,
@@ -21,6 +22,7 @@ from kralyavuz.clone_checker.providers import (
     SearchProviderError,
 )
 from kralyavuz.clone_checker.providers.search_provider import (
+    google_browser_profile_dirs,
     resolve_google_result_url,
 )
 from kralyavuz.clone_checker.reporting import build_clipboard_report
@@ -180,34 +182,193 @@ class GoogleSearchProviderTests(unittest.TestCase):
         self.assertEqual(results[0].title, "Browser Result")
 
     def test_playwright_fallback_launches_headless_and_reads_dom_results(self):
+        edge_profile = Path("C:/Profiles/Edge/User Data")
         with patch(
             "kralyavuz.clone_checker.providers.search_provider.sync_playwright"
-        ) as playwright_factory, patch(
-            "kralyavuz.clone_checker.providers.search_provider.find_opera_gx",
-            return_value=Path("C:/Opera GX/opera.exe"),
-        ):
+        ) as playwright_factory:
             playwright = playwright_factory.return_value.__enter__.return_value
-            browser = playwright.chromium.launch.return_value
-            context = browser.new_context.return_value
+            context = playwright.chromium.launch_persistent_context.return_value
             page = context.new_page.return_value
+            page.url = "https://www.google.com/search?q=atlasbet"
+            page.locator.return_value.inner_text.return_value = "Google results"
             page.locator.return_value.evaluate_all.return_value = [
                 {"url": "https://browser.example/result", "title": "Result"}
             ]
 
-            items = PlaywrightGoogleSearchFallback().search("atlasbet giriş", 5)
+            fallback = PlaywrightGoogleSearchFallback((("msedge", edge_profile),))
+            items = fallback.search("atlasbet giriş", 5)
 
-        playwright.chromium.launch.assert_called_once_with(
+        playwright.chromium.launch_persistent_context.assert_called_once_with(
+            user_data_dir=str(edge_profile),
+            channel="msedge",
             headless=True,
-            executable_path=str(Path("C:/Opera GX/opera.exe")),
+            locale="tr-TR",
+            timeout=10_000,
         )
         page.goto.assert_called_once()
         self.assertIn("q=atlasbet+giri%C5%9F", page.goto.call_args.args[0])
-        page.locator.assert_called_once_with("a:has(h3)")
+        page.locator.assert_any_call("a:has(h3)")
         context.close.assert_called_once_with()
-        browser.close.assert_called_once_with()
+        self.assertEqual(fallback.selected_channel, "msedge")
+        self.assertEqual(fallback.selected_profile_dir, edge_profile)
         self.assertEqual(
             items,
             [("https://browser.example/result", "Result")],
+        )
+
+    def test_locked_system_profile_retries_dedicated_profile_on_same_browser(self):
+        profiles = (
+            ("msedge", Path("C:/Profiles/Edge/User Data")),
+            ("msedge", Path("C:/KraLYavuz/Profiles/Edge")),
+            ("chrome", Path("C:/Profiles/Chrome/User Data")),
+        )
+        with patch(
+            "kralyavuz.clone_checker.providers.search_provider.sync_playwright"
+        ) as playwright_factory:
+            playwright = playwright_factory.return_value.__enter__.return_value
+            context = MagicMock()
+            page = context.new_page.return_value
+            page.url = "https://www.google.com/search?q=atlasbet"
+            page.locator.return_value.inner_text.return_value = "Google results"
+            page.locator.return_value.evaluate_all.return_value = []
+            playwright.chromium.launch_persistent_context.side_effect = [
+                PlaywrightError("Profil kilitli"),
+                context,
+            ]
+            fallback = PlaywrightGoogleSearchFallback(profiles)
+
+            fallback.search("atlasbet giriş", 5)
+
+        self.assertEqual(
+            [
+                (
+                    browser_call.kwargs["channel"],
+                    browser_call.kwargs["user_data_dir"],
+                )
+                for browser_call in playwright.chromium.launch_persistent_context.call_args_list
+            ],
+            [
+                ("msedge", str(profiles[0][1])),
+                ("msedge", str(profiles[1][1])),
+            ],
+        )
+        self.assertEqual(fallback.selected_channel, "msedge")
+        self.assertEqual(fallback.selected_profile_dir, profiles[1][1])
+
+    def test_playwright_fallback_uses_system_priority_without_opera(self):
+        profiles = (
+            ("msedge", Path("C:/Profiles/Edge")),
+            ("chrome", Path("C:/Profiles/Chrome")),
+            ("chromium", Path("C:/Profiles/Chromium")),
+        )
+        with patch(
+            "kralyavuz.clone_checker.providers.search_provider.sync_playwright"
+        ) as playwright_factory:
+            playwright = playwright_factory.return_value.__enter__.return_value
+            context = MagicMock()
+            page = context.new_page.return_value
+            page.url = "https://www.google.com/search?q=atlasbet"
+            page.locator.return_value.inner_text.return_value = "Google results"
+            page.locator.return_value.evaluate_all.return_value = []
+            playwright.chromium.launch_persistent_context.side_effect = [
+                PlaywrightError("Edge kurulu değil"),
+                context,
+            ]
+
+            PlaywrightGoogleSearchFallback(profiles).search("atlasbet giriş", 5)
+
+        self.assertEqual(
+            playwright.chromium.launch_persistent_context.call_args_list,
+            [
+                call(
+                    user_data_dir=str(profiles[0][1]),
+                    channel="msedge",
+                    headless=True,
+                    locale="tr-TR",
+                    timeout=10_000,
+                ),
+                call(
+                    user_data_dir=str(profiles[1][1]),
+                    channel="chrome",
+                    headless=True,
+                    locale="tr-TR",
+                    timeout=10_000,
+                ),
+            ],
+        )
+        self.assertTrue(
+            all(
+                "executable_path" not in browser_call.kwargs
+                for browser_call in playwright.chromium.launch_persistent_context.call_args_list
+            )
+        )
+        self.assertNotIn(
+            "opera",
+            str(
+                playwright.chromium.launch_persistent_context.call_args_list
+            ).casefold(),
+        )
+
+    def test_playwright_fallback_reaches_chromium_when_edge_and_chrome_fail(self):
+        profiles = (
+            ("msedge", Path("C:/Profiles/Edge")),
+            ("chrome", Path("C:/Profiles/Chrome")),
+            ("chromium", Path("C:/Profiles/Chromium")),
+        )
+        with patch(
+            "kralyavuz.clone_checker.providers.search_provider.sync_playwright"
+        ) as playwright_factory:
+            playwright = playwright_factory.return_value.__enter__.return_value
+            context = MagicMock()
+            page = context.new_page.return_value
+            page.url = "https://www.google.com/search?q=atlasbet"
+            page.locator.return_value.inner_text.return_value = "Google results"
+            page.locator.return_value.evaluate_all.return_value = []
+            playwright.chromium.launch_persistent_context.side_effect = [
+                PlaywrightError("Edge kurulu değil"),
+                PlaywrightError("Chrome kurulu değil"),
+                context,
+            ]
+
+            PlaywrightGoogleSearchFallback(profiles).search("atlasbet giriş", 5)
+
+        self.assertEqual(
+            [
+                browser_call.kwargs["channel"]
+                for browser_call in playwright.chromium.launch_persistent_context.call_args_list
+            ],
+            ["msedge", "chrome", "chromium"],
+        )
+
+    def test_existing_edge_and_chrome_profiles_are_selected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            local_app_data = root / "LocalAppData"
+            edge_profile = local_app_data / "Microsoft" / "Edge" / "User Data"
+            chrome_profile = local_app_data / "Google" / "Chrome" / "User Data"
+            edge_profile.mkdir(parents=True)
+            chrome_profile.mkdir(parents=True)
+            config_dir = root / "config"
+
+            profiles = google_browser_profile_dirs(
+                system_name="Windows",
+                environ={"LOCALAPPDATA": str(local_app_data)},
+                home=root,
+                config_dir=config_dir,
+            )
+
+        self.assertEqual(
+            profiles,
+            (
+                ("msedge", edge_profile),
+                ("msedge", config_dir / "browser_profiles" / "msedge"),
+                ("chrome", chrome_profile),
+                ("chrome", config_dir / "browser_profiles" / "chrome"),
+                (
+                    "chromium",
+                    config_dir / "browser_profiles" / "chromium",
+                ),
+            ),
         )
 
     def test_google_tracking_url_supports_q_and_url_parameters(self):
