@@ -245,6 +245,12 @@ class MainWindow(QMainWindow):
             lambda error: self.add_log(f"Krala Tap videosu oynatılamadı: {error}")
         )
 
+        self.domain_list_label = QLabel("URL veya domain listesi")
+        self.domain_header_row = QHBoxLayout()
+        self.domain_header_row.addWidget(self.domain_list_label)
+        self.domain_header_row.addStretch(1)
+        self.domain_header_row.addWidget(self.kral_tap_widget)
+
         self.output_dir_input = QLineEdit(str(get_output_dir()))
         self.output_dir_input.setReadOnly(True)
         self.select_output_dir_button = QPushButton("Klasör Seç")
@@ -265,7 +271,6 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.open_results_button)
         button_row.addStretch(1)
-        button_row.addWidget(self.kral_tap_widget)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -301,7 +306,7 @@ class MainWindow(QMainWindow):
         self.log_output.setReadOnly(True)
 
         layout = QVBoxLayout()
-        layout.addWidget(QLabel("URL veya domain listesi"))
+        layout.addLayout(self.domain_header_row)
         layout.addWidget(self.url_input)
         layout.addWidget(self.clone_checker_panel)
         layout.addWidget(QLabel("Screenshot kayıt klasörü"))

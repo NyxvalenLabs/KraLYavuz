@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -15,6 +16,7 @@ from kralyavuz.kral_tap import (
     KralTapVideoPopup,
     KralTapWidget,
 )
+from kralyavuz.main import MainWindow
 
 
 VIDEO_PATH = (
@@ -46,6 +48,36 @@ class KralTapWidgetTests(unittest.TestCase):
             self.assertEqual(widget.findChildren(QGroupBox), [])
             self.assertLess(widget.sizeHint().height(), 100)
             widget.close()
+
+    def test_main_window_places_widget_in_top_right_domain_header(self):
+        with (
+            patch("kralyavuz.main.load_config", return_value={"domains": []}),
+            patch(
+                "kralyavuz.main.save_domain_config",
+                return_value={"domains": [], "synced_domains": []},
+            ),
+            patch("kralyavuz.main.QTimer.singleShot"),
+            patch("kralyavuz.clone_checker.ui.CloneCheckerPanel.reload_whitelist"),
+        ):
+            window = MainWindow()
+
+        window.show()
+        self.app.processEvents()
+        central_layout = window.centralWidget().layout()
+
+        self.assertIs(central_layout.itemAt(0).layout(), window.domain_header_row)
+        self.assertIs(central_layout.itemAt(1).widget(), window.url_input)
+        self.assertEqual(window.domain_header_row.indexOf(window.domain_list_label), 0)
+        self.assertEqual(window.domain_header_row.indexOf(window.kral_tap_widget), 2)
+        self.assertGreater(
+            window.kral_tap_widget.geometry().left(),
+            window.domain_list_label.geometry().right(),
+        )
+        self.assertLess(
+            window.kral_tap_widget.geometry().bottom(),
+            window.url_input.geometry().top(),
+        )
+        window.close()
 
     def test_tap_count_is_saved_before_video_and_preserves_other_config(self):
         with tempfile.TemporaryDirectory() as directory:
