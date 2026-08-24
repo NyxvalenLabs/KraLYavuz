@@ -1,6 +1,8 @@
 import logging
 import os
 import platform
+import shutil
+from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable, List, Mapping, Optional, Protocol, Tuple
@@ -15,6 +17,8 @@ from ...platform_paths import CONFIG_DIR, DEFAULT_OUTPUT_DIR
 
 logger = logging.getLogger(__name__)
 GOOGLE_DEBUG_RESPONSE_PATH = DEFAULT_OUTPUT_DIR / "debug_google_response.html"
+PROFILE_CACHE_DIRS = frozenset({"cache", "gpucache", "code cache", "crashpad"})
+PROFILE_LOCK_FILES = frozenset({"lock", "lockfile"})
 
 
 class SearchProviderError(RuntimeError):
@@ -62,6 +66,78 @@ def google_browser_profile_dirs(
         if system_profile != dedicated_profile:
             profile_dirs.append((channel, dedicated_profile))
     return tuple(profile_dirs)
+
+
+def _copy_profile_file(source: Path, destination: Path) -> bool:
+    if destination.is_file():
+        source_stat = source.stat()
+        destination_stat = destination.stat()
+        if (
+            source_stat.st_size == destination_stat.st_size
+            and source_stat.st_mtime_ns <= destination_stat.st_mtime_ns
+        ):
+            return False
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.kralyavuz.tmp")
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(destination)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return True
+
+
+def clone_edge_profile(
+    source_user_data: Path,
+    target_user_data: Path,
+) -> Tuple[int, Tuple[str, ...]]:
+    source_local_state = source_user_data / "Local State"
+    source_default = source_user_data / "Default"
+    if not source_local_state.is_file() or not source_default.is_dir():
+        raise OSError(
+            "Edge profilinde Local State veya Default bulunamadı: "
+            f"{source_user_data}"
+        )
+
+    target_user_data.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    errors = []
+    try:
+        copied += int(
+            _copy_profile_file(
+                source_local_state,
+                target_user_data / "Local State",
+            )
+        )
+    except OSError as exc:
+        errors.append(f"Local State: {exc}")
+
+    target_default = target_user_data / "Default"
+    for root, directory_names, file_names in os.walk(source_default):
+        directory_names[:] = [
+            name
+            for name in directory_names
+            if name.casefold() not in PROFILE_CACHE_DIRS
+        ]
+        source_root = Path(root)
+        relative_root = source_root.relative_to(source_default)
+        for file_name in file_names:
+            if file_name.casefold() in PROFILE_LOCK_FILES:
+                continue
+            source_file = source_root / file_name
+            if source_file.is_symlink():
+                continue
+            destination_file = target_default / relative_root / file_name
+            try:
+                copied += int(_copy_profile_file(source_file, destination_file))
+            except OSError as exc:
+                errors.append(f"Default/{relative_root / file_name}: {exc}")
+
+    return copied, tuple(errors)
 
 
 def _record_google_debug_response(
@@ -278,28 +354,103 @@ class PlaywrightGoogleSearchFallback:
     def __init__(
         self,
         profile_dirs: Optional[Iterable[Tuple[str, Path]]] = None,
+        edge_clone_paths: Optional[Tuple[Path, Path]] = None,
     ) -> None:
-        self.profile_dirs = tuple(
+        discovered_profiles = tuple(
             google_browser_profile_dirs() if profile_dirs is None else profile_dirs
         )
+        if profile_dirs is None and edge_clone_paths is None:
+            edge_profiles = [
+                profile_dir
+                for channel, profile_dir in discovered_profiles
+                if channel == "msedge"
+            ]
+            if (
+                len(edge_profiles) >= 2
+                and self._profile_type("msedge", edge_profiles[0])
+                == "mevcut Edge kullanıcı profili"
+            ):
+                edge_clone_paths = (edge_profiles[0], edge_profiles[1])
+                discovered_profiles = tuple(
+                    (channel, profile_dir)
+                    for channel, profile_dir in discovered_profiles
+                    if not (
+                        channel == "msedge" and profile_dir == edge_profiles[0]
+                    )
+                )
+        self.profile_dirs = discovered_profiles
+        self.edge_clone_paths = edge_clone_paths
         self.selected_channel = ""
         self.selected_profile_dir: Optional[Path] = None
+
+    def _prepare_edge_clone(self) -> None:
+        if self.edge_clone_paths is None:
+            return
+        source_profile, target_profile = self.edge_clone_paths
+        logger.warning("Google fallback Edge clone kaynak profil: %s", source_profile)
+        logger.warning("Google fallback Edge clone hedef profil: %s", target_profile)
+        copied_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        try:
+            copied_count, copy_errors = clone_edge_profile(
+                source_profile,
+                target_profile,
+            )
+        except OSError as exc:
+            logger.warning(
+                "Google fallback Edge profil clone başarısız: %s", exc
+            )
+            return
+
+        logger.warning(
+            "Google fallback Edge profil kopyalanan zaman: %s; "
+            "güncellenen dosya: %s",
+            copied_at,
+            copied_count,
+        )
+        if copy_errors:
+            logger.warning(
+                "Google fallback Edge profil kopyalama uyarıları (%s): %s",
+                len(copy_errors),
+                " | ".join(copy_errors[:5]),
+            )
 
     def _launch_context(self, chromium):
         errors = []
         for channel, profile_dir in self.profile_dirs:
+            logger.warning(
+                "Google fallback profil deneniyor: channel=%s, user_data_dir=%s",
+                channel,
+                profile_dir,
+            )
             try:
                 context = chromium.launch_persistent_context(
                     user_data_dir=str(profile_dir),
                     channel=channel,
-                    headless=True,
+                    headless=False,
                     locale="tr-TR",
                     timeout=10_000,
                 )
                 self.selected_channel = channel
                 self.selected_profile_dir = profile_dir
+                logger.warning(
+                    "Google fallback seçilen browser channel: %s", channel
+                )
+                logger.warning(
+                    "Google fallback kullanılan user_data_dir: %s", profile_dir
+                )
+                logger.warning(
+                    "Google fallback profile türü: %s",
+                    self._profile_type(channel, profile_dir),
+                )
                 return context
             except PlaywrightError as exc:
+                logger.warning(
+                    "Google fallback profil açılamadı: channel=%s, "
+                    "user_data_dir=%s, exception=%s",
+                    channel,
+                    profile_dir,
+                    exc,
+                )
                 errors.append(
                     f"{channel} ({profile_dir}): {str(exc).splitlines()[0]}"
                 )
@@ -309,6 +460,7 @@ class PlaywrightGoogleSearchFallback:
         )
 
     def search(self, keyword: str, limit: int) -> List[Tuple[str, str]]:
+        self._prepare_edge_clone()
         query = urlencode(
             {
                 "q": keyword,
@@ -325,13 +477,31 @@ class PlaywrightGoogleSearchFallback:
                 try:
                     page = context.new_page()
                     page.goto(
+                        "https://www.google.com",
+                        wait_until="domcontentloaded",
+                        timeout=20_000,
+                    )
+                    page.wait_for_timeout(2_000)
+                    logger.warning(
+                        "Google fallback ana sayfa page.title(): %s", page.title()
+                    )
+                    logger.warning(
+                        "Google fallback ana sayfa page.url: %s", page.url
+                    )
+                    page.goto(
                         query_url,
                         wait_until="domcontentloaded",
                         timeout=20_000,
                     )
+                    logger.warning(
+                        "Google fallback arama page.title(): %s", page.title()
+                    )
+                    logger.warning(
+                        "Google fallback arama page.url: %s", page.url
+                    )
                     if self._is_captcha_page(page):
                         raise SearchProviderError(
-                            "Google headless browser CAPTCHA doğrulaması istedi."
+                            "Google CAPTCHA doğrulaması istedi."
                         )
                     try:
                         page.wait_for_selector("a:has(h3)", timeout=5_000)
@@ -372,6 +542,26 @@ class PlaywrightGoogleSearchFallback:
             marker in body_text
             for marker in ("captcha", "unusual traffic", "sıra dışı trafik")
         )
+
+    @staticmethod
+    def _profile_type(channel: str, profile_dir: Path) -> str:
+        normalized = profile_dir.as_posix().casefold().rstrip("/")
+        system_suffixes = {
+            "msedge": ("microsoft/edge/user data", "microsoft edge"),
+            "chrome": ("google/chrome/user data", "google/chrome"),
+            "chromium": ("chromium/user data", "application support/chromium"),
+        }
+        if any(
+            normalized.endswith(suffix)
+            for suffix in system_suffixes.get(channel, ())
+        ):
+            browser_name = {
+                "msedge": "Edge",
+                "chrome": "Chrome",
+                "chromium": "Chromium",
+            }.get(channel, channel)
+            return f"mevcut {browser_name} kullanıcı profili"
+        return "uygulama profili"
 
 
 class GoogleSearchProvider:
