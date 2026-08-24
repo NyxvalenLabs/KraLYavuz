@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from kralyavuz.app_config import save_domain_config
 from kralyavuz.clone_checker.models import (
     CloneCheckResult,
     CloneCheckStatus,
@@ -17,7 +18,7 @@ from kralyavuz.clone_checker.models import (
 )
 from kralyavuz.clone_checker.service import RISK_STATUSES, CloneCheckerService
 from kralyavuz.clone_checker.ui import CloneCheckerPanel
-from kralyavuz.clone_checker.whitelist import WhitelistStore
+from kralyavuz.clone_checker.whitelist import WhitelistStore, normalize_domain_list
 from kralyavuz.clone_checker.reporting import build_clipboard_report, report_result_count
 
 
@@ -64,7 +65,9 @@ class CloneCheckerTests(unittest.TestCase):
             self.assertTrue(entry.added_at)
             self.assertTrue(store.is_whitelisted_url("sub.example.com"))
             self.assertFalse(store.is_whitelisted_url("evil-example.com"))
-            self.assertEqual(json.loads(path.read_text())["domains"], ["keep.example"])
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["domains"], ["keep.example"])
+            self.assertEqual(saved["manual_whitelist"][0]["domain"], "example.com")
 
             self.assertTrue(store.remove_domain("example.com"))
             self.assertEqual(store.entries(), ())
@@ -140,12 +143,167 @@ class CloneCheckerTests(unittest.TestCase):
             self.assertEqual(panel.whitelist_table.topLevelItemCount(), 1)
             whitelist_row = panel.whitelist_table.topLevelItem(0)
             self.assertEqual(whitelist_row.text(0), "atlasbet1893.com")
-            self.assertTrue(whitelist_row.text(1))
+            self.assertEqual(whitelist_row.text(1), "Manuel")
+            self.assertTrue(whitelist_row.text(2))
 
             panel.whitelist_table.setCurrentItem(whitelist_row)
             panel._remove_whitelist_entry()
             self.assertEqual(whitelist.entries(), ())
             self.assertEqual(panel.whitelist_table.topLevelItemCount(), 0)
+
+    def test_legacy_whitelist_migrates_without_data_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "domains": ["keep.example"],
+                        "custom": True,
+                        "manual_whitelist": [
+                            {
+                                "domain": "manual.example",
+                                "added_at": "2026-01-01T00:00:00+00:00",
+                            }
+                        ],
+                        "clone_whitelist": [
+                            {
+                                "domain": "legacy.example",
+                                "added_at": "2025-01-01T00:00:00+00:00",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            entries = WhitelistStore(path).entries()
+            self.assertEqual(
+                [entry.domain for entry in entries],
+                ["legacy.example", "manual.example"],
+            )
+
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("clone_whitelist", saved)
+            self.assertEqual(
+                [entry["domain"] for entry in saved["manual_whitelist"]],
+                ["legacy.example", "manual.example"],
+            )
+            self.assertEqual(saved["domains"], ["keep.example"])
+            self.assertTrue(saved["custom"])
+
+    def test_synced_domains_follow_main_list_and_preserve_manual_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "domains": [],
+                        "manual_whitelist": [
+                            {
+                                "domain": "manual.example",
+                                "added_at": "2026-01-01T00:00:00+00:00",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = WhitelistStore(path)
+
+            domains = ["https://www.atlasbet.com/path", "EXAMPLE.com"]
+            save_domain_config(domains, normalize_domain_list(domains), path)
+            self.assertTrue(store.is_whitelisted_url("sub.atlasbet.com"))
+            self.assertEqual(
+                json.loads(path.read_text())["synced_domains"],
+                ["atlasbet.com", "example.com"],
+            )
+
+            remaining_domains = ["example.com"]
+            save_domain_config(
+                remaining_domains,
+                normalize_domain_list(remaining_domains),
+                path,
+            )
+            self.assertFalse(store.is_whitelisted_url("atlasbet.com"))
+            self.assertTrue(store.is_whitelisted_url("example.com"))
+            self.assertTrue(store.is_whitelisted_url("manual.example"))
+            self.assertEqual(
+                [entry.domain for entry in store.entries()],
+                ["example.com", "manual.example"],
+            )
+
+    def test_same_domain_is_merged_with_both_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "domains": ["shared.example"],
+                        "synced_domains": ["shared.example"],
+                        "manual_whitelist": [
+                            {
+                                "domain": "shared.example",
+                                "added_at": "2026-01-01T00:00:00+00:00",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            entries = WhitelistStore(path).entries()
+            self.assertEqual(len(entries), 1)
+            self.assertTrue(entries[0].is_synced)
+            self.assertTrue(entries[0].is_manual)
+            self.assertEqual(entries[0].source, "Ana Liste + Manuel")
+
+    def test_whitelist_ui_shows_sources_and_protects_synced_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "synced_domains": ["synced.example", "shared.example"],
+                        "manual_whitelist": [
+                            {
+                                "domain": "manual.example",
+                                "added_at": "2026-01-01T00:00:00+00:00",
+                            },
+                            {
+                                "domain": "shared.example",
+                                "added_at": "2026-01-02T00:00:00+00:00",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            whitelist = WhitelistStore(path)
+            panel = CloneCheckerPanel(CloneCheckerService(whitelist=whitelist))
+            rows = {}
+            for index in range(panel.whitelist_table.topLevelItemCount()):
+                row = panel.whitelist_table.topLevelItem(index)
+                rows[row.text(0)] = row
+
+            self.assertEqual(rows["synced.example"].text(1), "Ana Domain Listesi")
+            self.assertEqual(rows["manual.example"].text(1), "Manuel")
+            self.assertEqual(rows["shared.example"].text(1), "Ana Liste + Manuel")
+
+            panel.whitelist_table.setCurrentItem(rows["synced.example"])
+            self.assertFalse(panel.whitelist_delete_button.isEnabled())
+            panel._remove_whitelist_entry()
+            self.assertTrue(whitelist.is_whitelisted_url("synced.example"))
+
+            panel.whitelist_table.setCurrentItem(rows["shared.example"])
+            self.assertTrue(panel.whitelist_delete_button.isEnabled())
+            panel._remove_whitelist_entry()
+            shared = next(
+                entry for entry in whitelist.entries()
+                if entry.domain == "shared.example"
+            )
+            self.assertTrue(shared.is_synced)
+            self.assertFalse(shared.is_manual)
+            self.assertEqual(shared.source, "Ana Domain Listesi")
 
     def test_report_resolves_tracking_and_deduplicates_domains(self):
         def risk(rank, url, keyword="Atlasbet giriş"):

@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 from .platform_paths import CONFIG_PATH
 
@@ -33,6 +33,19 @@ def save_config(config: Dict[str, Any], path: Path = CONFIG_PATH) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def save_domain_config(
+    domains: Iterable[str],
+    synced_domains: Iterable[str],
+    path: Path = CONFIG_PATH,
+) -> Dict[str, Any]:
+    """Update only the main and synced domain lists in the latest config."""
+    config = load_config(path)
+    config["domains"] = list(domains)
+    config["synced_domains"] = list(synced_domains)
+    save_config(config, path)
+    return config
 
 
 def ensure_config(path: Path = CONFIG_PATH) -> None:

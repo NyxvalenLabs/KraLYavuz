@@ -21,6 +21,7 @@ from .models import CloneCheckResult, SearchResult
 from .reporting import build_clipboard_report, report_result_count
 from .scoring import CLONE_CANDIDATE_THRESHOLD
 from .service import RISK_STATUSES, CloneCheckerService
+from .whitelist import WhitelistEntry
 
 
 class CloneCheckWorker(QThread):
@@ -104,15 +105,22 @@ class CloneCheckerPanel(QGroupBox):
         result_header.addWidget(self.copy_button)
 
         self.whitelist_table = QTreeWidget()
-        self.whitelist_table.setHeaderLabels(["Domain", "Eklenme tarihi"])
+        self.whitelist_table.setHeaderLabels(["Domain", "Kaynak", "Eklenme tarihi"])
         self.whitelist_table.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.whitelist_table.header().setSectionResizeMode(
             1, QHeaderView.ResizeToContents
         )
+        self.whitelist_table.header().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents
+        )
         self.whitelist_table.setRootIsDecorated(False)
         self.whitelist_table.setMaximumHeight(96)
         self.whitelist_delete_button = QPushButton("Sil")
+        self.whitelist_delete_button.setEnabled(False)
         self.whitelist_delete_button.clicked.connect(self._remove_whitelist_entry)
+        self.whitelist_table.currentItemChanged.connect(
+            self._update_whitelist_delete_button
+        )
         whitelist_header = QHBoxLayout()
         whitelist_header.addWidget(QLabel("Whitelist Yönetimi"))
         whitelist_header.addStretch(1)
@@ -260,7 +268,15 @@ class CloneCheckerPanel(QGroupBox):
         item = self.whitelist_table.currentItem()
         if item is None:
             return
-        domain = item.text(0)
+        entry = item.data(0, Qt.UserRole)
+        if not isinstance(entry, WhitelistEntry):
+            return
+        domain = entry.domain
+        if not entry.is_manual:
+            self.result_label.setText(
+                f"{domain} ana domain listesinden geldiği için buradan silinemez."
+            )
+            return
         try:
             removed = self.service.whitelist.remove_domain(domain)
         except OSError as exc:
@@ -268,17 +284,43 @@ class CloneCheckerPanel(QGroupBox):
             return
         if removed:
             self._reload_whitelist()
-            self.result_label.setText(f"{domain} whitelist'ten silindi.")
-            self.log_added.emit(f"Klon Kontrol whitelist: {domain} silindi.")
+            if entry.is_synced:
+                self.result_label.setText(
+                    f"{domain} manuel listeden silindi; ana domain listesinde kalıyor."
+                )
+            else:
+                self.result_label.setText(f"{domain} whitelist'ten silindi.")
+            self.log_added.emit(f"Klon Kontrol manuel whitelist: {domain} silindi.")
+
+    @Slot()
+    def reload_whitelist(self) -> None:
+        self._reload_whitelist()
 
     def _reload_whitelist(self) -> None:
         self.whitelist_table.clear()
         for entry in self.service.whitelist.entries():
-            self.whitelist_table.addTopLevelItem(
-                QTreeWidgetItem(
-                    [entry.domain, self._format_added_at(entry.added_at)]
-                )
+            row = QTreeWidgetItem(
+                [
+                    entry.domain,
+                    entry.source,
+                    self._format_added_at(entry.added_at),
+                ]
             )
+            row.setData(0, Qt.UserRole, entry)
+            self.whitelist_table.addTopLevelItem(row)
+        self._update_whitelist_delete_button(self.whitelist_table.currentItem())
+
+    @Slot(object, object)
+    def _update_whitelist_delete_button(
+        self,
+        current: Optional[QTreeWidgetItem],
+        previous: Optional[QTreeWidgetItem] = None,
+    ) -> None:
+        del previous
+        entry = current.data(0, Qt.UserRole) if current is not None else None
+        self.whitelist_delete_button.setEnabled(
+            isinstance(entry, WhitelistEntry) and entry.is_manual
+        )
 
     @staticmethod
     def _format_added_at(value: str) -> str:

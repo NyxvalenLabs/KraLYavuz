@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .app_config import ensure_config, load_config, save_config
+from .app_config import ensure_config, load_config, save_config, save_domain_config
 from .batch_checker import (
     BatchDomainResult,
     ServiceTargets,
@@ -36,6 +36,7 @@ from .batch_checker import (
     run_batch,
 )
 from .clone_checker.ui import CloneCheckerPanel
+from .clone_checker.whitelist import normalize_domain_list
 from .output_settings import clean_output_dir, get_output_dir, set_output_dir
 
 
@@ -309,6 +310,7 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
+        self.save_domain_list()
         QTimer.singleShot(0, self.check_opera_session)
         if auto_start:
             QTimer.singleShot(300, self.start_check)
@@ -323,15 +325,20 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def save_domain_list(self) -> None:
-        self.config["domains"] = [
+        domains = [
             line.strip()
             for line in self.url_input.toPlainText().splitlines()
             if line.strip()
         ]
         try:
-            save_config(self.config)
+            self.config = save_domain_config(
+                domains,
+                normalize_domain_list(domains),
+            )
         except OSError as exc:
             self.status_label.setText(f"Link listesi kaydedilemedi: {exc}")
+        else:
+            self.clone_checker_panel.reload_whitelist()
 
     def _create_captcha_group(self, service: str) -> QGroupBox:
         image = QLabel("CAPTCHA bekleniyor")
