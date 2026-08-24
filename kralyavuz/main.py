@@ -37,6 +37,7 @@ from .batch_checker import (
 )
 from .clone_checker.ui import CloneCheckerPanel
 from .clone_checker.whitelist import normalize_domain_list
+from .kral_tap import KralTapWidget
 from .output_settings import clean_output_dir, get_output_dir, set_output_dir
 
 
@@ -236,6 +237,14 @@ class MainWindow(QMainWindow):
         self.clone_checker_panel = CloneCheckerPanel()
         self.clone_checker_panel.log_added.connect(self.add_log)
 
+        self.kral_tap_widget = KralTapWidget()
+        self.kral_tap_widget.persistence_failed.connect(
+            lambda error: self.add_log(f"Krala Tap sayacı kaydedilemedi: {error}")
+        )
+        self.kral_tap_widget.playback_failed.connect(
+            lambda error: self.add_log(f"Krala Tap videosu oynatılamadı: {error}")
+        )
+
         self.output_dir_input = QLineEdit(str(get_output_dir()))
         self.output_dir_input.setReadOnly(True)
         self.select_output_dir_button = QPushButton("Klasör Seç")
@@ -255,6 +264,8 @@ class MainWindow(QMainWindow):
         button_row = QHBoxLayout()
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.open_results_button)
+        button_row.addStretch(1)
+        button_row.addWidget(self.kral_tap_widget)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)

@@ -11,6 +11,9 @@ icon_path = project_root / "assets" / (
 datas = [(str(project_root / "assets"), "assets")]
 datas += collect_data_files("playwright")
 hidden_imports = collect_submodules("playwright")
+hidden_imports += [
+    "requests",
+]
 
 a = Analysis(
     [str(project_root / "run_kralyavuz.py")],
