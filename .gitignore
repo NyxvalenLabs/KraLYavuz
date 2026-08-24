@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+results/*
+!results/.gitkeep
+build/
+dist/
+*.spec.bak
+.DS_Store
+*.app
+sonuclar/
+*.log
+

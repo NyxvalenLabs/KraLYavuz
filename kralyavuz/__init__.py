@@ -1,0 +1,2 @@
+"""KraLYavuz desktop application package."""
+
