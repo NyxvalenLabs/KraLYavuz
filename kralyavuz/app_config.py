@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Mapping
 
 from .platform_paths import CONFIG_PATH
 
@@ -9,6 +9,8 @@ DEFAULT_CONFIG = {
     "domains": [],
     "google_api_key": "",
     "google_cx_id": "",
+    "clone_checker_brand": "",
+    "clone_checker_main_domain": "",
 }
 
 
@@ -59,6 +61,15 @@ def save_domain_config(
     config = load_config(path)
     config["domains"] = list(domains)
     config["synced_domains"] = list(synced_domains)
+    save_config(config, path)
+    return config
+
+
+def update_config(
+    updates: Mapping[str, Any], path: Path = CONFIG_PATH
+) -> Dict[str, Any]:
+    config = load_config(path)
+    config.update(updates)
     save_config(config, path)
     return config
 

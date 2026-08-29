@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QPoint, Qt, QThread, Signal, Slot
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..app_config import load_config, update_config
+from ..platform_paths import CONFIG_PATH
 from .models import CloneCheckResult, SearchResult
 from .reporting import build_clipboard_report, report_result_count
 from .scoring import CLONE_CANDIDATE_THRESHOLD
@@ -48,16 +51,31 @@ class CloneCheckWorker(QThread):
 class CloneCheckerPanel(QGroupBox):
     log_added = Signal(str)
 
-    def __init__(self, service: Optional[CloneCheckerService] = None) -> None:
+    def __init__(
+        self,
+        service: Optional[CloneCheckerService] = None,
+        config_path: Optional[Path] = None,
+    ) -> None:
         super().__init__("Klon Kontrol")
         self.service = service or CloneCheckerService()
+        self.config_path = config_path or getattr(
+            self.service.whitelist, "config_path", CONFIG_PATH
+        )
         self.worker: Optional[CloneCheckWorker] = None
         self.current_result: Optional[CloneCheckResult] = None
 
+        config = load_config(self.config_path)
+        saved_brand = config.get("clone_checker_brand", "")
+        saved_main_domain = config.get("clone_checker_main_domain", "")
+
         self.brand_input = QLineEdit()
         self.brand_input.setPlaceholderText("Marka adı")
+        self.brand_input.setText(saved_brand if isinstance(saved_brand, str) else "")
         self.main_domain_input = QLineEdit()
         self.main_domain_input.setPlaceholderText("Ana Domain")
+        self.main_domain_input.setText(
+            saved_main_domain if isinstance(saved_main_domain, str) else ""
+        )
         self.check_button = QPushButton("Kontrol Et")
         self.check_button.clicked.connect(self.run_check)
         self.copy_button = QPushButton("Kopyala")
@@ -65,6 +83,8 @@ class CloneCheckerPanel(QGroupBox):
         self.copy_button.clicked.connect(self.copy_risk_report)
         self.brand_input.returnPressed.connect(self.run_check)
         self.main_domain_input.returnPressed.connect(self.run_check)
+        self.brand_input.editingFinished.connect(self._save_input_settings)
+        self.main_domain_input.editingFinished.connect(self._save_input_settings)
 
         self.result_label = QLabel("Henüz kontrol yapılmadı.")
         self.result_label.setWordWrap(True)
@@ -134,6 +154,20 @@ class CloneCheckerPanel(QGroupBox):
         layout.addWidget(self.whitelist_table)
         self.setLayout(layout)
         self._reload_whitelist()
+
+    @Slot()
+    def _save_input_settings(self) -> None:
+        try:
+            update_config(
+                {
+                    "clone_checker_brand": self.brand_input.text(),
+                    "clone_checker_main_domain": self.main_domain_input.text(),
+                },
+                self.config_path,
+            )
+        except OSError as exc:
+            self.result_label.setText(f"Clone Checker ayarları kaydedilemedi: {exc}")
+            self.log_added.emit(f"Clone Checker ayar hatası: {exc}")
 
     @Slot()
     def run_check(self) -> None:

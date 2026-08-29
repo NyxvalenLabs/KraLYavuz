@@ -72,6 +72,56 @@ class CloneCheckerTests(unittest.TestCase):
             self.assertTrue(store.remove_domain("example.com"))
             self.assertEqual(store.entries(), ())
 
+    def test_clone_inputs_load_save_reload_and_preserve_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            preserved = {
+                "domains": ["site1.com"],
+                "synced_domains": ["site2.com"],
+                "manual_whitelist": ["trusted.com"],
+                "kral_tap_count": 7,
+                "google_api_key": "api-key",
+                "google_cx_id": "cx-id",
+                "custom_setting": {"enabled": True},
+            }
+            path.write_text(
+                json.dumps(
+                    {
+                        **preserved,
+                        "clone_checker_brand": "Atlasbet",
+                        "clone_checker_main_domain": "atlasbet.com",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            service = CloneCheckerService(whitelist=WhitelistStore(path))
+
+            panel = CloneCheckerPanel(service, config_path=path)
+            self.assertEqual(panel.brand_input.text(), "Atlasbet")
+            self.assertEqual(panel.main_domain_input.text(), "atlasbet.com")
+
+            panel.brand_input.setText("Yeni Marka")
+            panel.main_domain_input.setText("yeni.example")
+            panel.brand_input.editingFinished.emit()
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["clone_checker_brand"], "Yeni Marka")
+            self.assertEqual(saved["clone_checker_main_domain"], "yeni.example")
+            for key, value in preserved.items():
+                self.assertEqual(saved[key], value)
+
+            restored = CloneCheckerPanel(service, config_path=path)
+            self.assertEqual(restored.brand_input.text(), "Yeni Marka")
+            self.assertEqual(restored.main_domain_input.text(), "yeni.example")
+
+            restored.brand_input.clear()
+            restored.main_domain_input.clear()
+            restored.main_domain_input.editingFinished.emit()
+            cleared = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(cleared["clone_checker_brand"], "")
+            self.assertEqual(cleared["clone_checker_main_domain"], "")
+            for key, value in preserved.items():
+                self.assertEqual(cleared[key], value)
+
     def test_service_returns_only_non_whitelisted_risks(self):
         with tempfile.TemporaryDirectory() as directory:
             whitelist = WhitelistStore(Path(directory) / "config.json")

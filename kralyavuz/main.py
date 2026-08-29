@@ -27,7 +27,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .app_config import ensure_config, load_config, save_config, save_domain_config
+from .app_config import (
+    ensure_config,
+    load_config,
+    save_domain_config,
+    update_config,
+)
 from .batch_checker import (
     BatchDomainResult,
     ServiceTargets,
@@ -59,6 +64,7 @@ def parse_url_tasks(text: str) -> List[UrlTask]:
 
 @dataclass
 class CaptchaPanelState:
+    domain: str = ""
     target_id: str = ""
     image: bytes = b""
     input_value: str = ""
@@ -71,7 +77,7 @@ class BatchWorker(QThread):
     progress_changed = Signal(int, str)
     log_added = Signal(str)
     captcha_ready = Signal(bytes, str, str, str, bool)
-    captcha_reset = Signal(str)
+    captcha_reset = Signal(str, str)
     target_bound = Signal(str, str)
     finished_ok = Signal(object)
     failed = Signal(str)
@@ -87,8 +93,14 @@ class BatchWorker(QThread):
             "Aile Profili": None,
         }
         self._service_targets: Dict[str, str] = {}
-        self._captcha_domain: Optional[str] = None
-        self._active_domain: Optional[str] = None
+        self._captcha_domains: Dict[str, Optional[str]] = {
+            "BTK": None,
+            "Aile Profili": None,
+        }
+        self._active_domains: Dict[str, Optional[str]] = {
+            "BTK": None,
+            "Aile Profili": None,
+        }
 
     def _progress(
         self,
@@ -98,16 +110,14 @@ class BatchWorker(QThread):
         service: str,
         stage: str,
     ) -> None:
-        if self._active_domain != domain:
-            self._active_domain = domain
+        if self._active_domains[service] != domain:
+            self._active_domains[service] = domain
             with self._captcha_lock:
-                self._captcha_domain = None
-                for captcha_service in self._captcha_codes:
-                    self._captcha_codes[captcha_service] = None
-                for event in self._captcha_events.values():
-                    event.clear()
-            self.captcha_reset.emit(domain)
-            self.log_added.emit(f"Kontrol edilen URL: {domain}")
+                self._captcha_domains[service] = domain
+                self._captcha_codes[service] = None
+                self._captcha_events[service].clear()
+            self.captcha_reset.emit(service, domain)
+            self.log_added.emit(f"{service} kontrol edilen URL: {domain}")
         if service == "BTK" and stage == "Kontrol ediliyor":
             self.log_added.emit(f"BTK gönderilen: {domain}")
             self.log_added.emit(f"[{domain}] BTK sayfası açılıyor; CAPTCHA bekleniyor.")
@@ -133,10 +143,10 @@ class BatchWorker(QThread):
         retry: bool,
     ) -> None:
         with self._captcha_lock:
-            if self._captcha_domain != domain:
-                self._captcha_domain = domain
-                for event in self._captcha_events.values():
-                    event.clear()
+            if self._captcha_domains[service] != domain:
+                self._captcha_domains[service] = domain
+                self._captcha_codes[service] = None
+                self._captcha_events[service].clear()
             existing_target = self._service_targets.get(service)
             if existing_target and existing_target != target_id:
                 raise RuntimeError(f"{service} CAPTCHA targetId değişti.")
@@ -170,10 +180,16 @@ class BatchWorker(QThread):
             self._captcha_events[service].clear()
             return code
 
-    def submit_captcha(self, service: str, target_id: str, code: str) -> None:
+    def submit_captcha(
+        self, service: str, target_id: str, domain: str, code: str
+    ) -> None:
         with self._captcha_lock:
             if self._service_targets.get(service) != target_id:
                 raise RuntimeError(f"{service} CAPTCHA yanlış targetId için gönderilemez.")
+            if self._captcha_domains.get(service) != domain:
+                raise RuntimeError(
+                    f"{service} CAPTCHA yanlış domain için gönderilemez."
+                )
             self._captcha_codes[service] = code
         self._captcha_events[service].set()
 
@@ -292,7 +308,6 @@ class MainWindow(QMainWindow):
         self.btk_captcha_state = self.captcha_states["BTK"]
         self.guvenlinet_captcha_state = self.captcha_states["Aile Profili"]
         self.captcha_target_ids: Dict[str, str] = {}
-        self.captcha_domain: Optional[str] = None
         self.btk_captcha_group = self._create_captcha_group("BTK")
         self.family_captcha_group = self._create_captcha_group("Aile Profili")
         self.captcha_image, self.captcha_code_input, self.captcha_continue_button = (
@@ -343,8 +358,7 @@ class MainWindow(QMainWindow):
             return
         legacy = QSettings(APP_NAME, APP_NAME).value("screenshot_output_dir", "", type=str)
         if legacy:
-            self.config["screenshot_output_dir"] = legacy
-            save_config(self.config)
+            self.config = update_config({"screenshot_output_dir": legacy})
 
     @Slot()
     def save_domain_list(self) -> None:
@@ -453,8 +467,7 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         output_dir = set_output_dir(Path(selected))
-        self.config["screenshot_output_dir"] = str(output_dir)
-        save_config(self.config)
+        self.config = update_config({"screenshot_output_dir": str(output_dir)})
         self.output_dir_input.setText(str(output_dir))
         self.latest_result_path = output_dir
 
@@ -526,8 +539,8 @@ class MainWindow(QMainWindow):
         target_id: str,
         retry: bool,
     ) -> None:
-        if self.captcha_domain != domain:
-            self.on_captcha_reset(domain)
+        if self.captcha_states[service].domain != domain:
+            self.on_captcha_reset(service, domain)
         existing_target = self.captcha_target_ids.get(service)
         if existing_target and existing_target != target_id:
             self.on_failure(f"{service} UI targetId değişti; CAPTCHA reddedildi.")
@@ -574,10 +587,9 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
         self.add_log(message)
 
-    @Slot(str)
-    def on_captcha_reset(self, domain: str) -> None:
-        self._reset_captcha_panel(preserve_targets=True)
-        self.captcha_domain = domain
+    @Slot(str, str)
+    def on_captcha_reset(self, service: str, domain: str) -> None:
+        self._reset_captcha_service(service, domain, preserve_target=True)
 
     @Slot(str, str)
     def on_target_bound(self, service: str, target_id: str) -> None:
@@ -603,6 +615,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, f"{service} targetId bulunamadı.")
             return
         state = self.captcha_states[service]
+        domain = state.domain
+        if not domain:
+            QMessageBox.warning(self, APP_NAME, f"{service} aktif domaini bulunamadı.")
+            return
         state.input_value = code
         state.ready = False
         state.status = "Gönderiliyor" if code else "CAPTCHA bekleniyor"
@@ -614,7 +630,7 @@ class MainWindow(QMainWindow):
         else:
             self.add_log(f"{service} CAPTCHA yenileniyor.")
         try:
-            self.worker.submit_captcha(service, target_id, code)
+            self.worker.submit_captcha(service, target_id, domain, code)
         except RuntimeError as exc:
             self.on_failure(str(exc))
 
@@ -641,6 +657,8 @@ class MainWindow(QMainWindow):
 
     @Slot(int, str)
     def on_progress(self, value: int, stage: str) -> None:
+        if value < self.progress_bar.value():
+            return
         self.progress_bar.setValue(value)
         self.status_label.setText(stage)
 
@@ -695,23 +713,31 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.close)
 
     def _reset_captcha_panel(self, preserve_targets: bool = False) -> None:
-        self.captcha_domain = None
         if not preserve_targets:
             self.captcha_target_ids.clear()
-        for service, (image, code_input, continue_button) in self.captcha_widgets.items():
-            target_id = self.captcha_target_ids.get(service, "") if preserve_targets else ""
-            state = self.captcha_states[service]
-            state.target_id = target_id
-            state.image = b""
-            state.input_value = ""
-            state.ready = False
-            state.status = "CAPTCHA bekleniyor" if target_id else "Hazır değil"
-            image.clear()
-            image.setText("CAPTCHA bekleniyor")
-            code_input.clear()
-            code_input.setEnabled(False)
-            continue_button.setEnabled(bool(target_id))
-            self.captcha_status_labels[service].setText(state.status)
+        for service in self.captcha_widgets:
+            self._reset_captcha_service(
+                service, "", preserve_target=preserve_targets
+            )
+
+    def _reset_captcha_service(
+        self, service: str, domain: str, preserve_target: bool
+    ) -> None:
+        image, code_input, continue_button = self.captcha_widgets[service]
+        target_id = self.captcha_target_ids.get(service, "") if preserve_target else ""
+        state = self.captcha_states[service]
+        state.domain = domain
+        state.target_id = target_id
+        state.image = b""
+        state.input_value = ""
+        state.ready = False
+        state.status = "CAPTCHA bekleniyor" if target_id else "Hazır değil"
+        image.clear()
+        image.setText("CAPTCHA bekleniyor")
+        code_input.clear()
+        code_input.setEnabled(False)
+        continue_button.setEnabled(bool(target_id))
+        self.captcha_status_labels[service].setText(state.status)
 
     @Slot()
     def open_results(self) -> None:

@@ -2,6 +2,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Callable, Iterable, List, Optional, Union
 from urllib.parse import urlsplit
 
@@ -21,7 +22,6 @@ from .opera_btk_runner import (
     is_private_opera_page,
 )
 from .opera_cdp_bootstrap import ensure_opera_cdp
-from .output_settings import screenshot_path
 
 
 ProgressCallback = Callable[[int, int, str, str, str], None]
@@ -30,6 +30,9 @@ CaptchaWaiter = Callable[[str], Optional[str]]
 TargetCallback = Callable[[str, str, str], None]
 StopRequested = Callable[[], bool]
 DomainInput = Union[str, Iterable[str]]
+ServiceRunner = Callable[
+    [str, str, Optional[CaptchaCallback], Optional[CaptchaWaiter]], object
+]
 
 
 @dataclass
@@ -246,6 +249,97 @@ def _run_family_target(
         return result
 
 
+def _run_independent_service_queues(
+    domains: List[str],
+    btk_target_id: str,
+    family_target_id: str,
+    progress: Optional[ProgressCallback] = None,
+    captcha_ready: Optional[CaptchaCallback] = None,
+    wait_for_captcha: Optional[CaptchaWaiter] = None,
+    stop_requested: Optional[StopRequested] = None,
+    btk_runner: ServiceRunner = _run_btk_target,
+    family_runner: ServiceRunner = _run_family_target,
+) -> List[BatchDomainResult]:
+    results = [BatchDomainResult(domain=domain) for domain in domains]
+    total_steps = len(domains) * 2
+    completed_steps = 0
+    progress_lock = Lock()
+
+    def completed_count() -> int:
+        with progress_lock:
+            return completed_steps
+
+    def finish_step(domain: str, service: str, status: str) -> None:
+        nonlocal completed_steps
+        with progress_lock:
+            completed_steps += 1
+            current = completed_steps
+        _notify(progress, current, total_steps, domain, service, status)
+
+    def run_service_queue(
+        service: str, target_id: str, runner: ServiceRunner
+    ) -> None:
+        for item in results:
+            if stop_requested is not None and stop_requested():
+                break
+            domain = item.domain
+            _notify(
+                progress,
+                completed_count(),
+                total_steps,
+                domain,
+                service,
+                "Kontrol ediliyor",
+            )
+            if stop_requested is not None and stop_requested():
+                break
+            try:
+                result = runner(
+                    target_id,
+                    domain,
+                    captcha_ready,
+                    wait_for_captcha,
+                )
+            except (PlaywrightError, RuntimeError, ValueError) as exc:
+                status = f"Hata: {exc}"
+            else:
+                status = "Tamamlandı"
+                if service == "BTK":
+                    item.btk_result = result
+                    item.btk_screenshot_path = result.screenshot_path
+                    item.btk_screenshot_ok = result.screenshot_path.is_file()
+                    if not item.btk_screenshot_ok:
+                        status = "Eksik screenshot"
+                else:
+                    item.family_result = result
+                    item.family_screenshot_path = result.screenshot_path
+                    item.family_screenshot_ok = result.screenshot_path.is_file()
+                    if not item.family_screenshot_ok:
+                        status = "Eksik screenshot"
+
+            if service == "BTK":
+                item.btk_status = status
+            else:
+                item.family_status = status
+            finish_step(domain, service, status)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = (
+            executor.submit(
+                run_service_queue, "BTK", btk_target_id, btk_runner
+            ),
+            executor.submit(
+                run_service_queue,
+                "Aile Profili",
+                family_target_id,
+                family_runner,
+            ),
+        )
+        for future in as_completed(futures):
+            future.result()
+    return results
+
+
 def run_batch(
     values: DomainInput,
     progress: Optional[ProgressCallback] = None,
@@ -268,10 +362,6 @@ def run_batch(
             "Opera'yı açıp VPN'i aktif ettikten sonra tekrar deneyin."
         ) from exc
 
-    results: List[BatchDomainResult] = []
-    total_steps = len(domains) * 2
-    completed_steps = 0
-
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(CDP_URL, timeout=10_000)
         page = _find_existing_opera_page(browser)
@@ -284,86 +374,15 @@ def run_batch(
         if target_ready is not None:
             target_ready("BTK", btk_target_id, btk_page.url)
             target_ready("GüvenliNet", family_target_id, family_page.url)
-        for domain in domains:
-            if stop_requested is not None and stop_requested():
-                break
-            item = BatchDomainResult(domain=domain)
-            results.append(item)
-
-            _notify(
-                progress,
-                completed_steps,
-                total_steps,
-                domain,
-                "BTK",
-                "Kontrol ediliyor",
-            )
-            _notify(
-                progress,
-                completed_steps,
-                total_steps,
-                domain,
-                "Aile Profili",
-                "Kontrol ediliyor",
-            )
-            if stop_requested is not None and stop_requested():
-                break
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = {
-                    executor.submit(
-                        _run_btk_target,
-                        btk_target_id,
-                        domain,
-                        captcha_ready,
-                        wait_for_captcha,
-                    ): "BTK",
-                    executor.submit(
-                        _run_family_target,
-                        family_target_id,
-                        domain,
-                        captcha_ready,
-                        wait_for_captcha,
-                    ): "Aile Profili",
-                }
-                for future in as_completed(futures):
-                    service = futures[future]
-                    try:
-                        result = future.result()
-                    except (PlaywrightError, RuntimeError, ValueError) as exc:
-                        status = f"Hata: {exc}"
-                    else:
-                        status = "Tamamlandı"
-                        if service == "BTK":
-                            item.btk_result = result
-                            item.btk_screenshot_path = result.screenshot_path
-                        else:
-                            item.family_result = result
-                            item.family_screenshot_path = result.screenshot_path
-
-                    if service == "BTK":
-                        item.btk_status = status
-                    else:
-                        item.family_status = status
-                    completed_steps += 1
-                    _notify(
-                        progress,
-                        completed_steps,
-                        total_steps,
-                        domain,
-                        service,
-                        status,
-                    )
-
-            item.btk_screenshot_ok = screenshot_path(domain, "BTK").is_file()
-            item.family_screenshot_ok = screenshot_path(domain, "AileProfili").is_file()
-            if item.btk_status == "Tamamlandı" and not item.btk_screenshot_ok:
-                item.btk_status = "Eksik screenshot"
-            if item.family_status == "Tamamlandı" and not item.family_screenshot_ok:
-                item.family_status = "Eksik screenshot"
-            if stop_requested is not None and stop_requested():
-                break
-
-    return results
+        return _run_independent_service_queues(
+            domains,
+            btk_target_id,
+            family_target_id,
+            progress,
+            captcha_ready,
+            wait_for_captcha,
+            stop_requested,
+        )
 
 
 def main() -> int:
