@@ -18,9 +18,9 @@ import requests
 from .version import APP_VERSION
 
 
-GITHUB_REPOSITORY = "MeteLabs/KraLYavuz"
+GITHUB_REPOSITORY = "NyxvalenLabs/KraLYavuz"
 LATEST_RELEASE_URL = (
-    "https://api.github.com/repos/MeteLabs/KraLYavuz/releases/latest"
+    "https://api.github.com/repos/NyxvalenLabs/KraLYavuz/releases/latest"
 )
 WINDOWS_ASSET_NAME = "KraLYavuz_Windows.zip"
 UPDATER_EXE_NAME = "KraLYavuzUpdater.exe"

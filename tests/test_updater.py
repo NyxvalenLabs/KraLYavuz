@@ -20,7 +20,7 @@ from kralyavuz.updater_runner import apply_update, safe_extract_archive
 
 
 ASSET_URL = (
-    "https://github.com/MeteLabs/KraLYavuz/releases/download/"
+    "https://github.com/NyxvalenLabs/KraLYavuz/releases/download/"
     "v1.0.1/KraLYavuz_Windows.zip"
 )
 
@@ -112,6 +112,19 @@ class VersionAndReleaseTests(unittest.TestCase):
 
         self.assertIsNotNone(release)
         self.assertEqual(release.asset_url, ASSET_URL)
+
+    def test_windows_asset_from_another_repository_is_rejected(self):
+        payload = release_payload()
+        payload["assets"][0]["browser_download_url"] = (
+            "https://github.com/other/KraLYavuz/releases/download/"
+            "v1.0.1/KraLYavuz_Windows.zip"
+        )
+
+        with self.assertRaisesRegex(
+            UpdateError,
+            "Windows update asset adresi güvenilir değil",
+        ):
+            release_from_payload(payload)
 
     def test_missing_windows_asset_disables_update(self):
         self.assertIsNone(release_from_payload(release_payload(include_asset=False)))
