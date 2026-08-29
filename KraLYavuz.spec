@@ -15,6 +15,9 @@ hidden_imports += [
     "requests",
 ]
 
+if sys.platform == "win32":
+    hidden_imports += collect_submodules("pywinauto")
+
 a = Analysis(
     [str(project_root / "run_kralyavuz.py")],
     pathex=[str(project_root)],

@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 import requests
 from playwright.sync_api import Error as PlaywrightError, Page, sync_playwright
 
-from .btk_operator import CDP_URL, normalize_domain, verify_opera_vpn
+from .btk_operator import BTK_URL, CDP_URL, normalize_domain, verify_opera_vpn
 from .guvenlinet_checker import (
     GUVENLINET_URL,
     GuvenliNetResult,
@@ -22,7 +22,7 @@ from .opera_btk_runner import (
     is_private_opera_page,
 )
 from .opera_cdp_bootstrap import ensure_opera_cdp
-
+from .opera_vpn_control import ensure_opera_vpn
 
 ProgressCallback = Callable[[int, int, str, str, str], None]
 CaptchaCallback = Callable[[str, str, str, bytes, bool], None]
@@ -120,28 +120,141 @@ def _window_id(browser, page: Page) -> int:
 
 
 def _service_pages(browser) -> tuple[Page, Page]:
-    pages = [page for context in browser.contexts for page in context.pages]
-    btk_pages = [
-        page for page in pages if _is_btk_url(page.url) and is_private_opera_page(browser, page)
-    ]
-    family_pages = [
+    private_pages = [
         page
-        for page in pages
-        if _is_family_url(page.url) and is_private_opera_page(browser, page)
+        for context in browser.contexts
+        for page in context.pages
+        if is_private_opera_page(browser, page)
     ]
-    if not btk_pages or not family_pages:
-        raise RuntimeError("Hazır BTK/GüvenliNet sekmesi bulunamadı")
-    if len(btk_pages) != 1 or len(family_pages) != 1:
+
+    if not private_pages:
+        raise RuntimeError("Opera GX Private Window bulunamadı.")
+
+    btk_pages = [page for page in private_pages if _is_btk_url(page.url)]
+    family_pages = [page for page in private_pages if _is_family_url(page.url)]
+
+    if len(btk_pages) > 1 or len(family_pages) > 1:
         raise RuntimeError(
             "Hazır BTK/GüvenliNet sekmeleri tekil değil "
             f"(BTK: {len(btk_pages)}, GüvenliNet: {len(family_pages)})."
         )
+
+    def open_private_popup(source: Page, url: str, service: str) -> Page:
+        try:
+            with source.expect_popup(timeout=10_000) as popup_info:
+                source.evaluate(
+                    '(url) => window.open(url, "_blank")',
+                    url,
+                )
+            popup = popup_info.value
+            popup.wait_for_load_state("domcontentloaded", timeout=30_000)
+        except Exception as exc:
+            raise RuntimeError(
+                f"{service} sekmesi private pencerede otomatik açılamadı: {exc}"
+            ) from exc
+
+        if not is_private_opera_page(browser, popup):
+            try:
+                popup.close()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"{service} sekmesi Opera GX Private Window içinde açılamadı."
+            )
+
+        return popup
+
+    if not btk_pages and not family_pages:
+        btk_page = private_pages[0]
+
+        try:
+            with btk_page.expect_popup(timeout=10_000) as popup_info:
+                btk_page.evaluate(
+                    """
+                    ({btkUrl, familyUrl}) => {
+                        window.open(familyUrl, "_blank");
+                        window.location.href = btkUrl;
+                    }
+                    """,
+                    {
+                        "btkUrl": BTK_URL,
+                        "familyUrl": GUVENLINET_URL,
+                    },
+                )
+
+            family_page = popup_info.value
+
+            # İki navigasyon da artık başlamış durumda.
+            btk_page.wait_for_load_state(
+                "domcontentloaded",
+                timeout=30_000,
+            )
+            family_page.wait_for_load_state(
+                "domcontentloaded",
+                timeout=30_000,
+            )
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"BTK/GüvenliNet private sekmeleri otomatik açılamadı: {exc}"
+            ) from exc
+
+        if not is_private_opera_page(browser, btk_page):
+            raise RuntimeError(
+                "BTK sekmesi Opera GX Private Window içinde açılmadı."
+            )
+
+        if not is_private_opera_page(browser, family_page):
+            raise RuntimeError(
+                "GüvenliNet sekmesi Opera GX Private Window içinde açılmadı."
+            )
+
+        if not _is_btk_url(btk_page.url):
+            raise RuntimeError(
+                f"BTK sekmesi yanlış URL açtı: {btk_page.url}"
+            )
+
+        if not _is_family_url(family_page.url):
+            raise RuntimeError(
+                f"GüvenliNet sekmesi yanlış URL açtı: {family_page.url}"
+            )
+
+        btk_pages = [btk_page]
+        family_pages = [family_page]
+
+    if not btk_pages:
+        btk_page = open_private_popup(
+            family_pages[0],
+            BTK_URL,
+            "BTK",
+        )
+        if not _is_btk_url(btk_page.url):
+            raise RuntimeError(f"BTK sekmesi yanlış URL açtı: {btk_page.url}")
+        btk_pages = [btk_page]
+
+    if not family_pages:
+        family_page = open_private_popup(
+            btk_pages[0],
+            GUVENLINET_URL,
+            "GüvenliNet",
+        )
+        if not _is_family_url(family_page.url):
+            raise RuntimeError(
+                f"GüvenliNet sekmesi yanlış URL açtı: {family_page.url}"
+            )
+        family_pages = [family_page]
+
     btk_page = btk_pages[0]
     family_page = family_pages[0]
+
     if _target_id(btk_page) == _target_id(family_page):
         raise RuntimeError("BTK ve GüvenliNet aynı Opera sekmesine bağlandı.")
+
     if _window_id(browser, btk_page) != _window_id(browser, family_page):
-        raise RuntimeError("BTK ve GüvenliNet aynı Opera private penceresinde değil.")
+        raise RuntimeError(
+            "BTK ve GüvenliNet aynı Opera private penceresinde değil."
+        )
+
     return btk_page, family_page
 
 
@@ -158,6 +271,9 @@ def discover_service_targets() -> ServiceTargets:
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(CDP_URL, timeout=5_000)
         btk_page, family_page = _service_pages(browser)
+
+        ensure_opera_vpn(btk_page)
+
         return ServiceTargets(
             btk_target_id=_target_id(btk_page),
             btk_url=btk_page.url,
