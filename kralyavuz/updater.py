@@ -376,4 +376,9 @@ def launch_updater(zip_path: Path) -> subprocess.Popen:
         Path(sys.executable).name,
     ]
     creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    return subprocess.Popen(command, shell=False, creationflags=creation_flags)
+    return subprocess.Popen(
+    command,
+    shell=False,
+    creationflags=creation_flags,
+    cwd=str(temporary_updater.parent),
+)

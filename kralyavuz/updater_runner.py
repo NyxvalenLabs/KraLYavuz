@@ -207,6 +207,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[list[str]] = None) -> int:
     configure_logging()
+    os.chdir(update_temp_dir())
     args = parse_args(argv)
     try:
         run_update(args.pid, args.zip, args.install_dir, args.exe)
