@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -45,6 +46,15 @@ from .clone_checker.whitelist import normalize_domain_list
 from .kral_tap import KralTapWidget
 from .output_settings import clean_output_dir, get_output_dir, set_output_dir
 from .platform_paths import application_icon_path
+from .updater import (
+    ReleaseInfo,
+    UpdateError,
+    check_for_update,
+    download_update,
+    launch_updater,
+    windows_frozen_update_supported,
+)
+from .version import APP_VERSION
 
 
 APP_NAME = "KraLYavuz"
@@ -228,15 +238,55 @@ class OperaDiscoveryWorker(QThread):
             self.discovered.emit(targets)
 
 
+class UpdateCheckWorker(QThread):
+    update_available = Signal(object)
+    check_failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            release = check_for_update()
+        except UpdateError as exc:
+            self.check_failed.emit(str(exc))
+        else:
+            if release is not None:
+                self.update_available.emit(release)
+
+
+class UpdateDownloadWorker(QThread):
+    progress_changed = Signal(int)
+    downloaded = Signal(object)
+    download_failed = Signal(str)
+
+    def __init__(self, release: ReleaseInfo) -> None:
+        super().__init__()
+        self.release = release
+
+    def run(self) -> None:
+        try:
+            archive = download_update(
+                self.release,
+                progress=self.progress_changed.emit,
+            )
+        except UpdateError as exc:
+            self.download_failed.emit(str(exc))
+        else:
+            self.downloaded.emit(archive)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, auto_start: bool = False, auto_exit: bool = False) -> None:
         super().__init__()
         self.worker: Optional[BatchWorker] = None
         self.discovery_worker: Optional[OperaDiscoveryWorker] = None
+        self.update_check_worker: Optional[UpdateCheckWorker] = None
+        self.update_download_worker: Optional[UpdateDownloadWorker] = None
+        self.update_progress_dialog: Optional[QProgressDialog] = None
+        self.update_ready_to_exit = False
         self.service_targets: Optional[ServiceTargets] = None
         self.pending_start = False
         self.auto_exit = auto_exit
         self.close_when_finished = False
+        self.close_when_update_finished = False
         self.status_items: Dict[str, QTreeWidgetItem] = {}
         self.config = load_config()
         self._migrate_output_setting()
@@ -350,6 +400,8 @@ class MainWindow(QMainWindow):
 
         self.save_domain_list()
         QTimer.singleShot(0, self.check_opera_session)
+        if windows_frozen_update_supported():
+            QTimer.singleShot(1500, self.check_for_updates)
         if auto_start:
             QTimer.singleShot(300, self.start_check)
 
@@ -456,8 +508,123 @@ class MainWindow(QMainWindow):
         if self.discovery_worker is not None:
             self.discovery_worker.deleteLater()
         self.discovery_worker = None
+        if self.update_ready_to_exit:
+            QTimer.singleShot(0, QApplication.instance().quit)
+            return
         if retry:
             QTimer.singleShot(0, self.check_opera_session)
+
+    @Slot()
+    def check_for_updates(self) -> None:
+        if not windows_frozen_update_supported():
+            return
+        if self.update_check_worker and self.update_check_worker.isRunning():
+            return
+        self.update_check_worker = UpdateCheckWorker(self)
+        self.update_check_worker.update_available.connect(self.on_update_available)
+        self.update_check_worker.check_failed.connect(
+            lambda error: self.add_log(f"Güncelleme kontrolü atlandı: {error}")
+        )
+        self.update_check_worker.finished.connect(self.on_update_check_finished)
+        self.update_check_worker.start()
+
+    @Slot()
+    def on_update_check_finished(self) -> None:
+        if self.update_check_worker is not None:
+            self.update_check_worker.deleteLater()
+        self.update_check_worker = None
+        if self.close_when_update_finished:
+            QTimer.singleShot(0, self.close)
+
+    @Slot(object)
+    def on_update_available(self, payload: object) -> None:
+        if self.close_when_update_finished:
+            return
+        if not isinstance(payload, ReleaseInfo):
+            return
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("KraLYavuz Güncelleme")
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setText(f"Yeni sürüm mevcut: {payload.tag_name}")
+        dialog.setInformativeText(f"Mevcut sürüm: v{APP_VERSION}")
+        update_button = dialog.addButton("Güncelle", QMessageBox.AcceptRole)
+        dialog.addButton("Daha Sonra", QMessageBox.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is update_button:
+            self.start_update_download(payload)
+
+    def start_update_download(self, release: ReleaseInfo) -> None:
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(
+                self,
+                "KraLYavuz Güncelleme",
+                "Devam eden kontroller bittikten sonra güncellemeyi tekrar deneyin.",
+            )
+            return
+        if self.update_download_worker and self.update_download_worker.isRunning():
+            return
+
+        progress_dialog = QProgressDialog(
+            "Güncelleme indiriliyor...",
+            "",
+            0,
+            100,
+            self,
+        )
+        progress_dialog.setWindowTitle("KraLYavuz Güncelleme")
+        progress_dialog.setCancelButton(None)
+        progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setAutoClose(False)
+        progress_dialog.setValue(0)
+        progress_dialog.show()
+        self.update_progress_dialog = progress_dialog
+
+        self.update_download_worker = UpdateDownloadWorker(release)
+        self.update_download_worker.progress_changed.connect(progress_dialog.setValue)
+        self.update_download_worker.downloaded.connect(self.on_update_downloaded)
+        self.update_download_worker.download_failed.connect(self.on_update_download_failed)
+        self.update_download_worker.finished.connect(self.on_update_download_finished)
+        self.update_download_worker.start()
+
+    @Slot(object)
+    def on_update_downloaded(self, payload: object) -> None:
+        archive = Path(payload)
+        try:
+            launch_updater(archive)
+        except (OSError, UpdateError) as exc:
+            self.on_update_download_failed(str(exc))
+            return
+        self.add_log("Güncelleme doğrulandı; updater başlatıldı.")
+        self.status_label.setText("Güncelleme uygulanıyor...")
+        self.update_ready_to_exit = True
+
+    @Slot(str)
+    def on_update_download_failed(self, error: str) -> None:
+        if self.update_progress_dialog is not None:
+            self.update_progress_dialog.close()
+        if not self.close_when_update_finished:
+            QMessageBox.warning(
+                self,
+                "KraLYavuz Güncelleme",
+                f"Güncelleme uygulanamadı. Mevcut sürüm korunuyor.\n\n{error}",
+            )
+
+    @Slot()
+    def on_update_download_finished(self) -> None:
+        if self.update_progress_dialog is not None:
+            self.update_progress_dialog.close()
+            self.update_progress_dialog.deleteLater()
+        self.update_progress_dialog = None
+        if self.update_download_worker is not None:
+            self.update_download_worker.deleteLater()
+        self.update_download_worker = None
+        if self.update_ready_to_exit:
+            if self.discovery_worker and self.discovery_worker.isRunning():
+                self.status_label.setText("Arka plan işlemi tamamlanıyor...")
+            else:
+                QTimer.singleShot(0, QApplication.instance().quit)
+        elif self.close_when_update_finished:
+            QTimer.singleShot(0, self.close)
 
     @Slot()
     def select_output_dir(self) -> None:
@@ -751,6 +918,16 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Kontroller durduruluyor...")
             event.ignore()
             return
+        if self.update_download_worker and self.update_download_worker.isRunning():
+            self.close_when_update_finished = True
+            self.status_label.setText("Güncelleme indirmesinin bitmesi bekleniyor...")
+            event.ignore()
+            return
+        if self.update_check_worker and self.update_check_worker.isRunning():
+            self.close_when_update_finished = True
+            self.status_label.setText("Güncelleme kontrolünün bitmesi bekleniyor...")
+            event.ignore()
+            return
         event.accept()
 
 
@@ -767,6 +944,7 @@ def main() -> int:
     get_output_dir().mkdir(parents=True, exist_ok=True)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
     set_application_icon(app)
     window = MainWindow(auto_start=args.auto_start, auto_exit=args.auto_exit)
     window.show()
